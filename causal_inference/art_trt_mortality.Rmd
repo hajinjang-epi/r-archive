@@ -1,0 +1,256 @@
+---
+title: "Marginal Structural Models for ART and Mortality"
+author: "Hajin Jang"
+date: "3/31/2025"
+output: html_document
+---
+
+###This code estimates the causal effect of sustained antiretroviral therapy initiation on mortality using marginal structural models with inverse probability weighting to address time-varying confounding and informative censoring.
+
+
+## Read data
+
+```{r setup, include=FALSE}
+#install packages
+library(dplyr)
+library(ggplot2)
+
+#read in dataset
+dat <- read.csv("art.csv")
+
+summary(dat)
+```
+
+
+## Estimating the hazard ratio with pooled logistic regression
+
+```{r}
+mod1 <- glm(death ~ art + month + monthsq,
+	family = binomial(), data = dat)
+summary(mod1)
+exp(coef(mod1)['art'])
+
+mod2 <- glm(death ~ art + month + monthsq
+    + factor(age_0_cat) + sex + factor(origin) + factor(mode)
+    + factor(year_0_cat) + factor(cd4_0_cat) + factor(rna_0_cat),
+    family = binomial(), data = dat)
+summary(mod2)
+exp(coef(mod2)['art'])
+
+mod3 <- glm(death ~ art + month + monthsq
+    + factor(age_0_cat) + sex + factor(origin) + factor(mode)
+    + factor(year_0_cat) + factor(cd4_0_cat) + factor(rna_0_cat)
+    + cd4_v + cd4_v_sq + factor(rna_v_cat) + aids,
+    family = binomial(), data = dat)
+summary(mod3)
+exp(coef(mod3)['art'])
+```
+
+**Comment:** These pooled logistic models approximate a discrete-time hazard model for death using month and month squared to capture baseline hazard shape. Across models with increasing covariate adjustment (unadjusted, baseline-adjusted, then baseline plus time-updated covariates), the estimated ART effect reflects associations that may still be biased by time-varying confounding affected by prior treatment, motivating the weighted MSM approach.
+
+
+## Estimating components of the stabilized inverse probability treatment weights
+
+```{r}
+mod <- glm(art ~ month
+  + factor(age_0_cat) + sex + factor(origin) + factor(mode)
+  + factor(year_0_cat) + factor(cd4_0_cat) + factor(rna_0_cat)
+	+ cd4_v + cd4_v_sq + factor(rna_v_cat) + aids,
+	family = binomial(), data = subset(dat,pastart==0))
+
+dat$probA.d <- ifelse(dat$pastart==1,1,
+	predict(mod, type = 'response'))
+
+mod <- glm(art ~ month
+  + factor(age_0_cat) + sex + factor(origin) + factor(mode)
+  + factor(year_0_cat) + factor(cd4_0_cat) + factor(rna_0_cat),
+	family = binomial(), data = subset(dat,pastart==0))
+dat$probA.n <- ifelse(dat$pastart==1,1,
+	predict(mod, type = 'response'))
+```
+
+**Comment:** These models estimate components of stabilized inverse probability treatment weights among those not yet treated (pastart=0). The denominator model includes baseline and time-updated predictors of ART initiation, while the numerator model uses baseline predictors only, aiming to balance time-varying confounding while preserving baseline structure in stabilized weights.
+
+
+## Estimating components of the stabilized inverse probability censoring weights
+```{r}
+dat$notcensor <- 1- dat$censor
+
+mod <- glm(notcensor ~ art + month + monthsq
+  + factor(age_0_cat) + sex + factor(origin) + factor(mode)
+  + factor(year_0_cat) + factor(cd4_0_cat) + factor(rna_0_cat)
+	+ cd4_v + cd4_v_sq + factor(rna_v_cat) + aids,
+	family = binomial(), data = dat)
+dat$probC.d <- predict(mod, type = 'response')
+
+
+mod <- glm(notcensor ~ art + month + monthsq
+  + factor(age_0_cat) + sex + factor(origin) + factor(mode)
+  + factor(year_0_cat) + factor(cd4_0_cat) + factor(rna_0_cat),
+	family = binomial(), data = dat)
+dat$probC.n <- predict(mod, type = 'response')
+
+```
+
+**Comment:** These models estimate stabilized inverse probability censoring weights using notcensor as the outcome. The denominator allows censoring to depend on treatment and time-updated health status, while the numerator uses baseline covariates only, reducing bias from informative censoring under the assumption that included covariates sufficiently explain censoring.
+
+
+## Estimating weights
+```{r}
+dat$A.num <- ifelse(dat$art==1,dat$probA.n,1-dat$probA.n)
+dat$A.den <- ifelse(dat$art==1,dat$probA.d,1-dat$probA.d)
+dat$A.numcum <- ave(dat$A.num,dat$id,
+	FUN=function(x) cumprod(x))
+dat$A.dencum <- ave(dat$A.den,dat$id,
+	FUN=function(x) cumprod(x))
+
+
+dat$swA <- dat$A.numcum/dat$A.dencum
+dat$wA <- 1/dat$A.dencum
+
+
+dat$C.numcum <- ave(dat$probC.n,dat$id,
+	FUN=function(x) cumprod(x))
+dat$C.dencum <- ave(dat$probC.d,dat$id,
+	FUN=function(x) cumprod(x))
+dat$swC <- dat$C.numcum/dat$C.dencum
+dat$wC <- 1/dat$C.dencum
+
+dat$sw <- dat$swA*dat$swC
+dat$w <- dat$wA*dat$wC
+
+summary(dat[,c('swA','wA','swC','wC','sw','w')])
+dat$sw.trunc <- ifelse(dat$sw>10,10,dat$sw)
+```
+
+**Comment:** This chunk combines treatment and censoring components into final stabilized weights and summarizes their distribution to check positivity and identify extreme values. Weights are truncated at 10 to limit undue influence from highly weighted observations and improve estimator stability.
+
+
+## Estimating the hazard ratio with inverse probability weighted pooled logistic regression
+```{r}
+modw.temp <- glm(death ~ art + month + monthsq
+  + factor(age_0_cat) + sex + factor(origin) + factor(mode)
+  + factor(year_0_cat) + factor(cd4_0_cat) + factor(rna_0_cat),
+	family = quasibinomial(), data = dat, weights = sw.trunc)
+summary(modw.temp)
+exp(coef(modw.temp)['art'])
+
+require(geepack)
+modw <- geeglm(death ~ art + month + monthsq
+  + factor(age_0_cat) + sex + factor(origin) + factor(mode)
+  + factor(year_0_cat) + factor(cd4_0_cat) + factor(rna_0_cat),
+  data=dat, 
+  weights= sw.trunc, 
+  id= id,
+  corstr='independence', 
+  family=binomial(link = "logit")) ##use geeglm for robust variance
+summary(modw)
+beta <- coef(modw)
+SE <- coef(summary(modw))[,2]
+lcl <- beta-qnorm(0.975)*SE 
+ucl <- beta+qnorm(0.975)*SE
+exp(cbind(beta, lcl, ucl))
+exp(cbind(beta, lcl, ucl))[2,] ##valid conservative CI
+```
+
+**Comment:** This weighted pooled logistic regression estimates the causal effect of the sustained strategy “initiate ART at baseline” versus “never initiate ART” under the MSM framework. The exponentiated ART coefficient provides the estimated pooled hazard ratio based on truncated stabilized weights.
+
+```{r}
+exp(cbind(beta, lcl, ucl))[2,]
+```
+
+**Comment:** This GEE implementation provides robust standard errors for the weighted pooled logistic model, accounting for repeated person-month observations within individuals. The extracted exponentiated coefficient and confidence limits correspond to the primary reported estimate: HR about 0.69 with a 95% CI about 0.34 to 1.40, indicating a protective direction with substantial uncertainty. 
+
+
+## Truncation at 99th percentile 
+
+```{r}
+summary(dat[,c('swA','wA','swC','wC','sw','w')])
+truncate99 <- quantile(dat$sw, 0.99, na.rm=TRUE)
+
+dat$sw.truncate99 <- ifelse(dat$sw > truncate99, truncate99, dat$sw)
+
+require(geepack)
+modpart2 <- geeglm(death ~ art + month + monthsq
+  + factor(age_0_cat) + sex + factor(origin) + factor(mode)
+  + factor(year_0_cat) + factor(cd4_0_cat) + factor(rna_0_cat),
+  data=dat, 
+  weights= sw.truncate99, 
+  id= id,
+  corstr='independence', 
+  family=binomial(link = "logit")) 
+
+summary(modpart2)
+beta <- coef(modpart2)
+SE <- coef(summary(modpart2))[,2]
+lcl <- beta-qnorm(0.975)*SE 
+ucl <- beta+qnorm(0.975)*SE
+exp(cbind(beta, lcl, ucl))
+exp(cbind(beta, lcl, ucl))[2,] 
+```
+
+**Comment:** This sensitivity analysis replaces the fixed truncation threshold (10) with truncation at the empirical 99th percentile of the stabilized weights. Results remain very similar to the primary analysis, with HR about 0.69 and a slightly narrower 95% CI (about 0.35 to 1.36), suggesting the main conclusion is not driven by a single truncation rule. 
+
+
+## Counterfactual survival curves
+
+```{r}
+library(geepack)
+
+modw <- geeglm(death ~ art + month + monthsq
+  + factor(age_0_cat) + sex + factor(origin) + factor(mode)
+  + factor(year_0_cat) + factor(cd4_0_cat) + factor(rna_0_cat),
+  data = dat,
+  weights = sw.trunc,
+  id = id,
+  corstr = "independence",
+  family = binomial(link = "logit"))
+
+predict_data <- dat
+predict_data_treated <- predict_data
+predict_data_treated$art <- 1
+
+predict_data_untreated <- predict_data
+predict_data_untreated$art <- 0
+
+
+
+predict_data_treated$pred_death <- predict(modw, newdata = predict_data_treated, type = "response")
+predict_data_untreated$pred_death <- predict(modw, newdata = predict_data_untreated, type = "response")
+
+
+
+predict_data_treated$pred_surv <- 1 - predict_data_treated$pred_death
+predict_data_untreated$pred_surv <- 1 - predict_data_untreated$pred_death
+
+
+
+library(dplyr)
+
+surv_curve_treated <- predict_data_treated %>%
+  group_by(month) %>%
+  summarise(surv = mean(pred_surv)) %>%
+  mutate(cum_surv = cumprod(surv))
+
+surv_curve_untreated <- predict_data_untreated %>%
+  group_by(month) %>%
+  summarise(surv = mean(pred_surv)) %>%
+  mutate(cum_surv = cumprod(surv))
+
+
+
+library(ggplot2)
+
+ggplot() +
+  geom_line(data = surv_curve_treated, aes(x = month, y = cum_surv), color = "blue", size = 1.2) +
+  geom_line(data = surv_curve_untreated, aes(x = month, y = cum_surv), color = "red", size = 1.2) +
+  labs(title = "Estimated Survival Curves under ART vs No ART",
+       x = "Month",
+       y = "Survival Probability") +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme(legend.position = "none")
+```
+
+**Comment:** This code generates model-based counterfactual survival curves under two sustained strategies by predicting death probabilities setting art to 1 versus 0, converting them to survival probabilities, and then taking cumulative products over time. The resulting curves visualize the estimated survival advantage under ART compared with no ART across follow-up.
+

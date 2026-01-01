@@ -1,0 +1,59 @@
+---
+title: "Causal Inference: Instrumental Variables, Negative Controls, and Partial Identification Methods"
+author: "Hajin Jang"
+date: "3/10/2025"
+output: html_document
+---
+
+### This project covers assumption-driven causal reasoning by integrating instrumental variables, negative controls, and partial identification methods.
+
+
+## Library
+```{r}
+library(dplyr)
+library(readr)
+library(sem)
+library(tidyverse)
+```
+
+## Data
+```{r}
+dat <- read.csv('nhefs.csv')
+dat <- subset(dat,is.na(wt82_71)==FALSE)
+summary(dat)
+nrow(dat)
+```
+
+## Instrumental variable estimation
+```{r}
+dat$price82_flag <- ifelse(dat$price82 >= 1.95, 1, 0)
+mod <- tsls(wt82_71 ~ qsmk, ~ price82_flag, data=dat)
+summary(mod)
+confint(mod)
+
+tab <- table(dat$price82_flag, dat$qsmk)
+prop.table(tab, 1) * 100
+
+chi_test <- chisq.test(tab)
+print(chi_test)
+
+dat2 <- subset(dat, !is.na(wt82_71))
+
+mod <- tsls(wt82_71 ~ qsmk, ~price82, data=dat2)
+summary(mod)
+confint(mod)
+
+mod2 <- glm(qsmk ~ price82, family=binomial, data=dat2)
+summary(mod2)
+```
+
+**Instrument Definition and Relevance:** This project evaluates cigarette price in 1982 as an instrumental variable for smoking cessation. Empirical assessment using a chi-square test showed no meaningful association between the instrument and smoking cessation, indicating a failure of the relevance condition and raising concerns about instrument strength.
+
+**Instrumental Variable Estimation and Complier Interpretation:** Despite weak evidence of instrument relevance, two-stage least squares was applied to estimate the causal mean difference in weight change among compliers. The resulting estimate reflects a local average treatment effect and should be interpreted as pertaining only to individuals whose smoking behavior would respond to changes in cigarette price.
+
+**Instrument Validity and Assumption-Based Limitations:** Key instrumental variable assumptions beyond relevance—including the exclusion restriction and the absence of common causes between the instrument and outcome—are not empirically verifiable and may be violated in this context, substantially limiting the credibility of causal interpretation.
+
+**Negative Control Exposures as Diagnostic Tools:** Negative control examples illustrate how null associations fail to confirm the absence of unmeasured confounding, whereas non-null associations can falsify causal assumptions, underscoring their role as diagnostic rather than confirmatory tools.
+
+**Partial Identification and Assumption-Driven Inference:** Bounding approaches demonstrate that conclusions about causal direction and magnitude depend critically on which assumptions are considered plausible, emphasizing that weaker assumptions yield wider but more robust causal intervals.
+
