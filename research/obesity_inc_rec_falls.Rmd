@@ -1,0 +1,473 @@
+---
+title: "Associations of Obesity Phenotypes with Incident and Recurrent Falls in Older Adults"
+author: "Hajin Jang"
+date: "2025-12-05"
+output:
+  html_document:
+    toc: true
+    toc_float: False
+    number_sections: False
+---
+
+## Data 
+
+```{r}
+final <- read.csv("final.csv")
+baseline <- read.csv("baseline.csv")
+
+## Make all column names lowercase
+names(final)    <- tolower(names(final))
+names(baseline) <- tolower(names(baseline))
+```
+
+```{r}
+library(dplyr)
+library(geepack)
+library(emmeans)
+
+vars_needed <- c(
+  "fallind",
+  "recurrentfall",
+  "fallnumbers",
+  "wbobecat",
+  "abobe",
+  "saobecat",
+  "studyno",
+  "sex",
+  "race",
+  "educa",
+  "smk",
+  "curdrnk",
+  "ageint",
+  "physactivity",
+  "id_nffi",
+  "nffiyear"
+)
+
+dat <- final %>%
+  select(all_of(vars_needed)) %>%
+  filter(complete.cases(.)) %>%
+  mutate(
+    ## Subject id
+    id_nffi  = factor(id_nffi),
+    
+    ## Whole body obesity: set 2 as reference level
+    wbobecat = factor(wbobecat,
+                      levels = c(2, 1, 3, 4),
+                      labels = c("2", "1", "3", "4")),
+    
+    ## Abdominal obesity as factor (reference will be the first level)
+    abobe    = factor(abobe),
+    
+    ## Sarcopenic obesity as factor, 1 is reference
+    saobecat = factor(saobecat),
+    
+    studyno  = factor(studyno),
+    sex      = factor(sex),
+    race     = factor(race),
+    educa    = factor(educa),
+    smk      = factor(smk),
+    curdrnk  = factor(curdrnk),
+    
+    nffiyear = as.numeric(nffiyear),
+    
+    ## Outcomes as numeric 0/1 or counts
+    fallind       = as.numeric(fallind),
+    recurrentfall = as.numeric(recurrentfall),
+    fallnumbers   = as.numeric(fallnumbers)
+  )
+```
+
+
+## Libraries
+
+```{r}
+library(dplyr)
+library(geepack)
+library(emmeans)
+```
+
+
+## Descriptive Statistics
+
+```{r}
+## Categorical variables by saobecat
+vars <- c("sex", "race", "educa", "smk", "curdrnk")
+
+freq_list <- lapply(vars, function(v) {
+  
+  ## Frequency table
+  tbl <- table(baseline[[v]], baseline$saobecat)
+  
+  ## Column percentages
+  col_pct <- prop.table(tbl, margin = 2)
+  
+  ## Row percentages
+  row_pct <- prop.table(tbl, margin = 1)
+  
+  list(
+    freq = tbl,
+    col_pct = col_pct,
+    row_pct = row_pct
+  )
+})
+
+names(freq_list) <- vars
+
+freq_list$sex$col_pct
+freq_list$race$col_pct
+freq_list$educa$col_pct
+freq_list$smk$col_pct
+freq_list$curdrnk$col_pct
+
+
+baseline %>%
+  group_by(saobecat) %>%
+  summarize(
+    n_age  = sum(!is.na(age)),
+    mean_age = mean(age, na.rm = TRUE),
+    sd_age   = sd(age, na.rm = TRUE),
+    
+    n_phys  = sum(!is.na(physactivity)),
+    mean_phys = mean(physactivity, na.rm = TRUE),
+    sd_phys   = sd(physactivity, na.rm = TRUE),
+    
+    n_bmi  = sum(!is.na(bmi_baseline)),
+    mean_bmi = mean(bmi_baseline, na.rm = TRUE),
+    sd_bmi   = sd(bmi_baseline, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+## 1. Categorical tests
+cat_vars <- c("sex", "race", "educa", "smk", "curdrnk")
+
+cat_tests <- lapply(cat_vars, function(v) {
+  tab <- table(baseline[[v]], baseline$saobecat)
+  if (any(chisq.test(tab)$expected < 5)) {
+    p_val <- fisher.test(tab)$p.value
+    test_name <- "Fisher"
+  } else {
+    p_val <- chisq.test(tab)$p.value
+    test_name <- "Chi-square"
+  }
+  data.frame(variable = v, test = test_name, p_value = p_val)
+})
+
+cat_tests <- do.call(rbind, cat_tests)
+
+
+## 2. Continuous tests
+cont_vars <- c("age", "physactivity", "bmi_baseline")
+
+cont_tests <- lapply(cont_vars, function(v) {
+  dat <- baseline[, c(v, "saobecat")]
+  dat <- dat[complete.cases(dat), ]
+  x <- dat[[v]]
+  g <- dat$saobecat
+  
+  sw <- by(x, g, function(z) shapiro.test(z)$p.value)
+  if (all(sw > 0.05, na.rm = TRUE)) {
+    p_val <- t.test(x ~ g)$p.value
+    test_name <- "t-test"
+  } else {
+    p_val <- wilcox.test(x ~ g)$p.value
+    test_name <- "Wilcoxon"
+  }
+  data.frame(variable = v, test = test_name, p_value = p_val)
+})
+
+cont_tests <- do.call(rbind, cont_tests)
+
+
+## 3. Combined
+covariate_tests <- rbind(cont_tests, cat_tests)
+covariate_tests
+```
+
+
+## GEE: Incident fall
+
+```{r}
+## whole-body obesity
+fit_wb <- geeglm(
+  fallind ~ wbobecat + studyno + sex + race + educa + smk + curdrnk + ageint + physactivity,
+  id     = id_nffi,       # subject
+  waves  = nffiyear,      # within
+  corstr = "ar1",         # AR(1), same as type=ar(1)
+  family = binomial(link = "logit"),
+  data   = dat
+)
+summary(fit_wb)
+
+## abdominal obesity
+fit_ab <- geeglm(
+  fallind ~ abobe + studyno + sex + race + educa + smk + curdrnk + ageint + physactivity,
+  id     = id_nffi,       # subject
+  waves  = nffiyear,      # within
+  corstr = "ar1",         # AR(1), same as type=ar(1)
+  family = binomial(link = "logit"),
+  data   = dat
+)
+summary(fit_ab)
+
+## sarcopenic obesity
+fit_so <- geeglm(
+  fallind ~ saobecat + studyno + sex + race + educa + smk + curdrnk + ageint + physactivity,
+  id     = id_nffi,       # subject
+  waves  = nffiyear,      # within
+  corstr = "ar1",         # AR(1), same as type=ar(1)
+  family = binomial(link = "logit"),
+  data   = dat
+)
+summary(fit_so)
+```
+
+```{r}
+## ORs table
+get_or_table <- function(model, varname) {
+  
+  emm <- emmeans(model, as.formula(paste("~", varname)))
+  
+  contr <- contrast(emm, method = "trt.vs.ctrl", ref = 1)
+  
+  link_df <- as.data.frame(summary(contr, type = "link"))
+  
+  or_table <- link_df %>%
+    mutate(
+      OR    = exp(estimate),
+      lower = exp(estimate - 1.96 * SE),
+      upper = exp(estimate + 1.96 * SE)
+    ) %>%
+    select(contrast, OR, lower, upper, p.value)
+  
+  return(or_table)
+}
+```
+
+```{r}
+## Results by whole-body, abdominal, and sarcopenic obesity
+or_wb <- get_or_table(fit_wb, "wbobecat")
+or_wb
+
+or_ab <- get_or_table(fit_ab, "abobe")
+or_ab
+
+or_so <- get_or_table(fit_so, "saobecat")
+or_so
+```
+
+
+## GEE: Recurrent Falls
+
+```{r}
+## whole-body obesity
+fit_wb_re <- geeglm(
+  recurrentfall ~ wbobecat + studyno + sex + race + educa + smk + curdrnk + ageint + physactivity,
+  id     = id_nffi,       # subject
+  waves  = nffiyear,      # within
+  corstr = "ar1",         # AR(1), same as type=ar(1)
+  family = binomial(link = "logit"),
+  data   = dat
+)
+summary(fit_wb_re)
+
+## abdominal obesity
+fit_ab_re <- geeglm(
+  recurrentfall ~ abobe + studyno + sex + race + educa + smk + curdrnk + ageint + physactivity,
+  id     = id_nffi,       # subject
+  waves  = nffiyear,      # within
+  corstr = "ar1",         # AR(1), same as type=ar(1)
+  family = binomial(link = "logit"),
+  data   = dat
+)
+summary(fit_ab_re)
+
+## sarcopenic obesity
+fit_so_re <- geeglm(
+  recurrentfall ~ saobecat + studyno + sex + race + educa + smk + curdrnk + ageint + physactivity,
+  id     = id_nffi,       # subject
+  waves  = nffiyear,      # within
+  corstr = "ar1",         # AR(1), same as type=ar(1)
+  family = binomial(link = "logit"),
+  data   = dat
+)
+summary(fit_so_re)
+```
+
+```{r}
+## Results by whole-body, abdominal, and sarcopenic obesity
+or_wb_re <- get_or_table(fit_wb_re, "wbobecat")
+or_wb_re
+
+or_ab_re <- get_or_table(fit_ab_re, "abobe")
+or_ab_re
+
+or_so_re <- get_or_table(fit_so_re, "saobecat")
+or_so_re
+```
+
+
+## Forest plot
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(forestploter)
+library(dplyr)
+library(finalfit)
+library(grid)
+library(ggplot2)
+```
+
+
+## Graphic: Incident fall
+
+```{r}
+data <- data.frame(
+    Phenotypes = c("Whole-body Obesity","      Underweight","      Normal","      Overweight","      Obese","Abdominal Obesity","      No","      Yes", "Sarcopenic Obesity","      Non-Obese Non-Sarcopenic","      Non-Sarcopenic Obese","      Non-Obese Sarcopenic","      Sarcopenic Obese"),
+  "Obs(%)" = c(" ", "0.8","28.8","44.3","26.1"," ","46.6","53.4"," ","30.9","40.3","13.9","14.9"),
+  OR = c(0.00,0.97,1.00,1.04,1.28,0.00,1.00,1.12,0.00,1.00,1.15,1.25,1.45),
+  CI_Lower = c(0.00,0.76,1.00,0.98,1.20,0.00,1.00,1.07,0.00,1.00,1.08,1.16,1.34),
+  CI_Upper = c(0.00,1.24,1.00,1.09,1.36,0.00,1.00,1.18,0.00,1.00,1.21,1.35,1.56)
+)
+
+data$` ` <- paste(rep(" ", 30), collapse = " ")
+
+data$`OR [95% CI]` <- paste(data$OR, " [", data$CI_Lower, ", ", data$CI_Upper, "]", sep = "")
+
+
+
+# Final data manipulation part
+
+data$OR <- format(data$OR, nsmall = 2)
+data$CI_Lower <- format(data$CI_Lower, nsmall = 2)
+data$CI_Upper <- format(data$CI_Upper, nsmall = 2)
+
+data$`OR [95% CI]` <- paste(data$OR, " [", data$CI_Lower, ", ", data$CI_Upper, "]", sep = "")
+
+data$CI_Upper <- as.numeric(data$CI_Upper)
+data$CI_Lower <- as.numeric(data$CI_Lower)
+data$OR <- as.numeric(data$OR)
+```
+
+```{r}
+tm <- forest_theme(base_size = 14,
+                   # Graphical parameters of confidence intervals
+                   ci_pch = 15,
+                   ci_col = "darkgoldenrod",
+                   ci_fill = "darkblue",
+                   ci_alpha = 1,
+                   ci_lty = 1,
+                   ci_lwd = 2,
+                   ci_Theight = 0.2,
+                   # Graphical parameters of reference line
+                   refline_lwd = 1,
+                   refline_lty = "dashed",
+                   refline_col = "grey20",
+                   # Graphical parameters of vertical line
+                   vertline_lwd = 1,
+                   vertline_lty = "dashed",
+                   vertline_col = "grey20",
+                   shade = c("white", "ivory")
+                   )
+```
+
+```{r}
+dt_fig <- data[, c(1, 6, 2, 7)]
+colnames(dt_fig) <- c("Phenotypes", "", "Obs(%)", "OR [95% CI]")
+
+pt <- forest(dt_fig,
+             est = data$OR,
+             lower = data$CI_Lower, 
+             upper = data$CI_Upper,
+             sizes = 1.2,
+             is_summary = c(rep(FALSE, nrow(data) - 1), FALSE),
+             ci_column = 2,     
+             ref_line = 1,
+             xlim = c(0.5, 2),
+             ticks_at = c(0.5, 1, 1.5, 2),
+             xlab = "                     Odds Ratios",
+             theme = tm,
+             row_spacing = 2,
+             text_size = 14)
+
+ggsave("incident_fp.png", plot = pt, width = 9, height = 7, dpi = 300, bg = "white")
+```
+
+
+## Graphic: Recurrent falls
+
+```{r}
+data <- data.frame(
+    Phenotypes = c("Whole-body Obesity","      Underweight","      Normal","      Overweight","      Obese","Abdominal Obesity","      No","      Yes", "Sarcopenic Obesity","      Non-Obese Non-Sarcopenic","      Non-Sarcopenic Obese","      Non-Obese Sarcopenic","      Sarcopenic Obese"),
+  "Obs(%)" = c(" ", "0.7","27.6","44.4","27.3"," ","46.9","53.1"," ","30.4","39.4","14.5","15.7"),
+  OR = c(0.00,1.02,1.00,1.07,1.40,0.00,1.00,1.17,0.00,1.00,1.19,1.31,1.60),
+  CI_Lower = c(0.00,0.70,1.00,0.99,1.28,0.00,1.00,1.09,0.00,1.00,1.10,1.18,1.43),
+  CI_Upper = c(0.00,1.50,1.00,1.16,1.54,0.00,1.00,1.25,0.00,1.00,1.30,1.46,1.78)
+)
+
+data$` ` <- paste(rep(" ", 30), collapse = " ")
+
+data$`OR [95% CI]` <- paste(data$OR, " [", data$CI_Lower, ", ", data$CI_Upper, "]", sep = "")
+
+
+
+# Final data manipulation part
+
+data$OR <- format(data$OR, nsmall = 2)
+data$CI_Lower <- format(data$CI_Lower, nsmall = 2)
+data$CI_Upper <- format(data$CI_Upper, nsmall = 2)
+
+data$`OR [95% CI]` <- paste(data$OR, " [", data$CI_Lower, ", ", data$CI_Upper, "]", sep = "")
+
+data$CI_Upper <- as.numeric(data$CI_Upper)
+data$CI_Lower <- as.numeric(data$CI_Lower)
+data$OR <- as.numeric(data$OR)
+```
+
+```{r}
+tm <- forest_theme(base_size = 14,
+                   # Graphical parameters of confidence intervals
+                   ci_pch = 15,
+                   ci_col = "darkgoldenrod",
+                   ci_fill = "darkblue",
+                   ci_alpha = 1,
+                   ci_lty = 1,
+                   ci_lwd = 2,
+                   ci_Theight = 0.2,
+                   # Graphical parameters of reference line
+                   refline_lwd = 1,
+                   refline_lty = "dashed",
+                   refline_col = "grey20",
+                   # Graphical parameters of vertical line
+                   vertline_lwd = 1,
+                   vertline_lty = "dashed",
+                   vertline_col = "grey20",
+                   shade = c("white", "ivory")
+                   )
+```
+
+```{r}
+dt_fig <- data[, c(1, 6, 2, 7)]
+colnames(dt_fig) <- c("Phenotypes", "", "Obs(%)", "OR [95% CI]")
+
+pt <- forest(dt_fig,
+             est = data$OR,
+             lower = data$CI_Lower, 
+             upper = data$CI_Upper,
+             sizes = 1.2,
+             is_summary = c(rep(FALSE, nrow(data) - 1), FALSE),
+             ci_column = 2,     
+             ref_line = 1,
+             xlim = c(0.5, 2),
+             ticks_at = c(0.5, 1, 1.5, 2),
+             xlab = "                     Odds Ratios",
+             theme = tm,
+             row_spacing = 2,
+             text_size = 14)
+
+ggsave("recurrent_fp.png", plot = pt, width = 9, height = 7, dpi = 300, bg = "white")
+```
+
+
+
